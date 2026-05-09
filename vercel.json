@@ -1,14 +1,3 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/**/*.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "rewrites": [
-    { "source": "/auth/login", "destination": "/api/auth/login" },
-    { "source": "/auth/callback", "destination": "/api/auth/callback" },
-    { "source": "/api/emails", "destination": "/api/emails" }
-  ]
+  "version": 2
 }
