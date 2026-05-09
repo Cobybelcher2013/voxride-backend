@@ -1,97 +1,82 @@
-const express = require('express');
-const session = require('express-session');
-const cors = require('cors');
-const axios = require('axios');
-const msal = require('@azure/msal-node');
-
-const app = express();
-
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  credentials: true
-}));
-
-app.use(express.json());
-app.use(session({
-  secret: 'voxride-secret-key',
-  resave: false,
-  saveUninitialized: false
-}));
+const { ConfidentialClientApplication } = require('@azure/msal-node');
 
 const msalConfig = {
   auth: {
     clientId: process.env.MICROSOFT_CLIENT_ID,
     clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
-    authority: `https://login.microsoftonline.com/common`
+    authority: 'https://login.microsoftonline.com/common'
   }
 };
 
-const cca = new msal.ConfidentialClientApplication(msalConfig);
+const cca = new ConfidentialClientApplication(msalConfig);
+const REDIRECT_URI = process.env.REDIRECT_URI;
+const FRONTEND_URL = process.env.FRONTEND_URL;
 
-// Login route
-app.get('/auth/login', async (req, res) => {
-  const authUrl = await cca.getAuthCodeUrl({
-    scopes: ['Mail.Read', 'Mail.Send', 'User.Read'],
-    redirectUri: process.env.REDIRECT_URI
-  });
-  res.redirect(authUrl);
-});
+module.exports = async (req, res) => {
+  const url = req.url;
 
-// Callback route
-app.get('/auth/callback', async (req, res) => {
-  try {
-    const result = await cca.acquireTokenByCode({
-      code: req.query.code,
-      scopes: ['Mail.Read', 'Mail.Send', 'User.Read'],
-      redirectUri: process.env.REDIRECT_URI
-    });
-    req.session.accessToken = result.accessToken;
-    req.session.userEmail = result.account.username;
-    res.redirect(`${process.env.FRONTEND_URL}/index/index.html?auth=success`);
-  } catch (err) {
-    res.redirect(`${process.env.FRONTEND_URL}/index/index.html?auth=error`);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+
+  if (url.startsWith('/auth/login')) {
+    try {
+      const authUrl = await cca.getAuthCodeUrl({
+        scopes: ['Mail.Read', 'Mail.Send', 'User.Read', 'offline_access'],
+        redirectUri: REDIRECT_URI
+      });
+      res.writeHead(302, { Location: authUrl });
+      res.end();
+    } catch(e) {
+      res.status(500).json({ error: e.message });
+    }
+    return;
   }
-});
 
-// Get emails route
-app.get('/api/emails', async (req, res) => {
-  if (!req.session.accessToken) {
-    return res.status(401).json({ error: 'Not authenticated' });
+  if (url.startsWith('/auth/callback')) {
+    const urlParams = new URL(req.url, `https://${req.headers.host}`);
+    const code = urlParams.searchParams.get('code');
+    if (!code) { res.status(400).json({ error: 'No code provided' }); return; }
+    try {
+      const result = await cca.acquireTokenByCode({
+        code,
+        scopes: ['Mail.Read', 'Mail.Send', 'User.Read', 'offline_access'],
+        redirectUri: REDIRECT_URI
+      });
+      const token = result.accessToken;
+      const email = result.account.username;
+      res.writeHead(302, { Location: `${FRONTEND_URL}/index/index.html?auth=success&token=${token}&email=${encodeURIComponent(email)}` });
+      res.end();
+    } catch(e) {
+      res.writeHead(302, { Location: `${FRONTEND_URL}/index/index.html?auth=error&msg=${encodeURIComponent(e.message)}` });
+      res.end();
+    }
+    return;
   }
-  try {
-    const response = await axios.get('https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime desc', {
-      headers: { Authorization: `Bearer ${req.session.accessToken}` }
-    });
-    res.json(response.data.value);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+
+  if (url.startsWith('/api/emails')) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) { res.status(401).json({ error: 'No token' }); return; }
+    const token = authHeader.replace('Bearer ', '');
+    try {
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/messages?$top=20&$orderby=receivedDateTime desc&$select=id,subject,from,isRead,receivedDateTime,bodyPreview,body', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (data.error) { res.status(400).json({ error: data.error.message }); return; }
+      res.status(200).json(data.value);
+    } catch(e) {
+      res.status(500).json({ error: e.message });
+    }
+    return;
   }
-});
 
-// Get user info
-app.get('/api/user', async (req, res) => {
-  if (!req.session.accessToken) {
-    return res.status(401).json({ error: 'Not authenticated' });
+  if (url === '/api/health' || url === '/') {
+    res.status(200).json({ status: 'Voxride backend running', version: '2.0' });
+    return;
   }
-  try {
-    const response = await axios.get('https://graph.microsoft.com/v1.0/me', {
-      headers: { Authorization: `Bearer ${req.session.accessToken}` }
-    });
-    res.json(response.data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
-// Check auth status
-app.get('/api/auth-status', (req, res) => {
-  res.json({
-    authenticated: !!req.session.accessToken,
-    email: req.session.userEmail || null
-  });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Voxride backend running on port ${PORT}`));
-
-module.exports = app;
+  res.status(404).json({ error: 'Route not found', url });
+};
